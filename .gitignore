@@ -1,38 +1,55 @@
-[Db]in/
+# .NET
+[Bb]in/
 [Oo]bj/
 [Dd]ebug/
 [Rr]elease/
 x64/
 x86/
 [Bb]ld/
+.vs/
+
+# Visual Studio / VS Code
 *.user
 *.userosscache
-*.sln.docstates
-.suo
-.vs/
-_ReSharper/
+*.suo
 .vscode/
 !.vscode/settings.json
 !.vscode/tasks.json
 !.vscode/launch.json
 !.vscode/extensions.json
 *.code-workspace
-.history/
-.ionide/
+
+# Rider / ReSharper
+_ReSharper/
 .idea/
 *.sln.iml
-.DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db
+
+# Node / Angular
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Angular
+.angular/
+dist/
+coverage/
+
+# Environment / secrets
 appsettings.Development.json
 usersecrets.json
 *.pem
 *.key
 *.pfx
+
+# Logs
 *.log
 .logs/
-node_modules/
+
+# OS files
+.DS_Store
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
