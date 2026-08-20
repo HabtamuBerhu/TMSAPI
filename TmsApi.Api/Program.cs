@@ -301,7 +301,7 @@ app.Use(async (context, next) =>
 
 app.MapHub<TmsHub>("/hubs/tms");
 
-
+app.MapHub<TmsHub>("/hubs/tms").RequireCors("TmsClient");
 // ============================================================
 // DEVELOPMENT / OPENAPI
 // ============================================================
