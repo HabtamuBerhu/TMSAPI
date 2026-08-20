@@ -10,7 +10,7 @@ using Asp.Versioning;
 using MediatR;
 using TmsApi.Application.Enrollments.Commands;
 using TmsApi.Application.Enrollments.Queries;
-using TmsApi.Application.Hubs; 
+using TmsApi.Application.Hubs;
 
 [ApiController]
 [Route("api/v{version:apiVersion}/enrollments")]
@@ -21,54 +21,54 @@ public class EnrollmentsController(
     IHubContext<TmsHub, ITmsHubClient> hubContext) : ControllerBase
 {
 
-    [HttpPost]
-    [ProducesResponseType(StatusCodes.Status201Created)]
-    [ProducesResponseType(StatusCodes.Status400BadRequest)]
-    [ProducesResponseType(StatusCodes.Status404NotFound)]
-    [ProducesResponseType(StatusCodes.Status409Conflict)]
-    public async Task<IActionResult> Enroll(
-        EnrollStudentCommand command,
-        CancellationToken ct)
-    {
-        var result = await mediator.Send(
-            command,
-            ct);
+    // [HttpPost]
+    // [ProducesResponseType(StatusCodes.Status201Created)]
+    // [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    // [ProducesResponseType(StatusCodes.Status404NotFound)]
+    // [ProducesResponseType(StatusCodes.Status409Conflict)]
+    // public async Task<IActionResult> Enroll(
+    //     EnrollStudentCommand command,
+    //     CancellationToken ct)
+    // {
+    //     var result = await mediator.Send(
+    //         command,
+    //         ct);
 
 
-        return result.Match<IActionResult>(
+    //     return result.Match<IActionResult>(
 
-            onSuccess: created =>
-                CreatedAtAction(
-                    nameof(GetSchedule),
-                    new
-                    {
-                        studentId = created.StudentId
-                    },
-                    created),
-
-
-            onFailure: error =>
-            {
-                var status = error.Code switch
-                {
-                    "course_not_found" =>
-                        StatusCodes.Status404NotFound,
-
-                    "course_full" or "already_enrolled" =>
-                        StatusCodes.Status409Conflict,
-
-                    _ =>
-                        StatusCodes.Status400BadRequest
-                };
+    //         onSuccess: created =>
+    //             CreatedAtAction(
+    //                 nameof(GetSchedule),
+    //                 new
+    //                 {
+    //                     studentId = created.StudentId
+    //                 },
+    //                 created),
 
 
-                return Problem(
-                    statusCode: status,
-                    title: "Enrollment rejected",
-                    detail: error.Message,
-                    type: $"https://tms.local/errors/{error.Code}");
-            });
-    }
+    //         onFailure: error =>
+    //         {
+    //             var status = error.Code switch
+    //             {
+    //                 "course_not_found" =>
+    //                     StatusCodes.Status404NotFound,
+
+    //                 "course_full" or "already_enrolled" =>
+    //                     StatusCodes.Status409Conflict,
+
+    //                 _ =>
+    //                     StatusCodes.Status400BadRequest
+    //             };
+
+
+    //             return Problem(
+    //                 statusCode: status,
+    //                 title: "Enrollment rejected",
+    //                 detail: error.Message,
+    //                 type: $"https://tms.local/errors/{error.Code}");
+    //         });
+    // }
 
 
     [HttpGet("{studentId}/schedule")]
@@ -119,4 +119,19 @@ public class EnrollmentsController(
 
         return NoContent();
     }
+    [HttpPost]
+    public async Task<IActionResult> CreateEnrollment(
+           int studentId,
+           int courseId,
+           CancellationToken ct)
+    {
+        var result =
+           await enrollmentService.CreateEnrollmentAsync(studentId,
+               courseId,
+               ct);
+
+        return Ok(result);
+    }
+
+
 }

@@ -15,8 +15,11 @@ public class Enrollment
 
     // Exercise 9
     public bool IsArchived { get; set; }
+    public string Status { get; set; } = "Pending";
 
     public Student Student { get; set; } = null!;
 
     public Course Course { get; set; } = null!;
+
+
 }
