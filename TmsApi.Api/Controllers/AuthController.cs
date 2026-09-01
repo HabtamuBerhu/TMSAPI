@@ -1,104 +1,314 @@
-using Asp.Versioning;
+
+using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
-using TmsApi.Application.Dtos;
+using Microsoft.AspNetCore.RateLimiting;
+using Microsoft.EntityFrameworkCore;
+
+using TmsApi.Infrastructure.Identity;
+using TmsApi.Infrastructure.Persistence;
+using TmsApi.Infrastructure.Services;
+using TmsApi.Domain.Entities;
 
 namespace TmsApi.Api.Controllers;
 
 [ApiController]
-[ApiVersion("1.0")]
-[Route("api/{version:apiVersion}/auth")]
+[Route("api/[controller]")]
 public class AuthController : ControllerBase
 {
-    private const string AuthCookieName = "tms_auth";
+    private readonly UserManager<TmsUser> _userManager;
+    private readonly RoleManager<IdentityRole> _roleManager;
+    private readonly TmsDbContext _context;
+    private readonly TokenService _tokenService;
 
-    [HttpPost("login")]
-    public IActionResult Login(
-        [FromBody] LoginRequest request,
-        [FromServices] IWebHostEnvironment env)
+    public AuthController(
+        UserManager<TmsUser> userManager,
+        RoleManager<IdentityRole> roleManager,
+        TmsDbContext context,
+        TokenService tokenService)
     {
-        // Demo credentials
-        if (request.Username != "admin" ||
-            request.Password != "Password123!")
+        _userManager = userManager;
+        _roleManager = roleManager;
+        _context = context;
+        _tokenService = tokenService;
+    }
+
+    // ============================================================
+    // REGISTER
+    // ============================================================
+
+    public record RegisterRequest(
+        string Email,
+        string Password,
+        string FirstName,
+        string LastName,
+        string Role);
+
+    [HttpPost("register")]
+    public async Task<IActionResult> Register(
+        [FromBody] RegisterRequest request)
+    {
+        var existingUser =
+            await _userManager.FindByEmailAsync(request.Email);
+
+        if (existingUser != null)
         {
-            return Unauthorized(new
+            // Prevent account enumeration
+            return Ok(new
             {
-                detail = "Invalid username or password."
+                message = "Registration request received."
             });
         }
 
-        // Demo authentication token.
-        // Later this can be replaced with a real JWT/session ID.
-        var authToken = "header.payload.signature-demo-token";
-
-        Response.Cookies.Append(
-            AuthCookieName,
-            authToken,
-            new CookieOptions
-            {
-                HttpOnly = true,
-
-                // HTTPS in production.
-                // HTTP is allowed during local development.
-                Secure = !env.IsDevelopment(),
-
-                // Prevents cross-site cookie sending.
-                SameSite = SameSiteMode.Strict,
-
-                Expires = DateTimeOffset.UtcNow.AddHours(2),
-
-                Path = "/"
-            });
-
-        return Ok(
-            new UserProfileDto(
-                "System Admin",
-                "Admin"));
-    }
-
-    [HttpGet("me")]
-    public IActionResult GetCurrentUser()
-    {
-        // Browser automatically sends the HttpOnly cookie.
-        if (Request.Cookies.TryGetValue(
-                AuthCookieName,
-                out var token) &&
-            !string.IsNullOrWhiteSpace(token))
+        var user = new TmsUser
         {
-            return Ok(
-                new UserProfileDto(
-                    "System Admin",
-                    "Admin"));
+            UserName = request.Email,
+            Email = request.Email,
+            FirstName = request.FirstName,
+            LastName = request.LastName
+        };
+
+        var result = await _userManager.CreateAsync(
+            user,
+            request.Password);
+
+        if (!result.Succeeded)
+        {
+            var errors =
+                result.Errors.Select(e => e.Description);
+
+            return BadRequest(new { errors });
         }
 
-        return Unauthorized(new
+        // Ensure requested role exists
+        if (!await _roleManager.RoleExistsAsync(request.Role))
         {
-            detail = "Session expired or missing authentication cookie."
-        });
-    }
+            await _roleManager.CreateAsync(
+                new IdentityRole(request.Role));
+        }
 
-    [HttpPost("logout")]
-    public IActionResult Logout()
-    {
-        Response.Cookies.Delete(
-            AuthCookieName,
-            new CookieOptions
-            {
-                HttpOnly = true,
-                SameSite = SameSiteMode.Strict,
-                Path = "/"
-            });
-
-        Response.Cookies.Delete(
-            "XSRF-TOKEN",
-            new CookieOptions
-            {
-                SameSite = SameSiteMode.Strict,
-                Path = "/"
-            });
+        await _userManager.AddToRoleAsync(
+            user,
+            request.Role);
 
         return Ok(new
         {
-            message = "Logged out successfully."
+            message = "Registration successful."
+        });
+    }
+
+    // ============================================================
+    // LOGIN
+    // ============================================================
+
+    public record LoginRequest(
+        string Email,
+        string Password);
+
+    [EnableRateLimiting("AuthLimiter")]
+    [HttpPost("login")]
+    public async Task<IActionResult> Login(
+        [FromBody] LoginRequest request)
+    {
+        var user =
+            await _userManager.FindByEmailAsync(request.Email);
+
+        if (user == null)
+        {
+            return Unauthorized(new
+            {
+                detail = "Invalid credentials."
+            });
+        }
+
+        // Check account lockout
+        if (await _userManager.IsLockedOutAsync(user))
+        {
+            return StatusCode(423, new
+            {
+                detail =
+                    "Account locked due to multiple failed login attempts. Try again in 15 minutes."
+            });
+        }
+
+        // Check password
+        var validPassword =
+            await _userManager.CheckPasswordAsync(
+                user,
+                request.Password);
+
+        if (!validPassword)
+        {
+            await _userManager.AccessFailedAsync(user);
+
+            return Unauthorized(new
+            {
+                detail = "Invalid credentials."
+            });
+        }
+
+        // Reset failed attempt counter
+        await _userManager.ResetAccessFailedCountAsync(user);
+
+        // Get user's roles
+        var roles =
+            await _userManager.GetRolesAsync(user);
+
+        // Generate JWT access token
+        var accessToken =
+            _tokenService.GenerateJwt(user, roles);
+
+        // ========================================================
+        // CREATE INITIAL REFRESH TOKEN
+        // ========================================================
+
+        var refreshToken = new RefreshToken
+        {
+            Token = Guid.NewGuid().ToString("N"),
+            UserId = user.Id,
+            ExpiresAt = DateTime.UtcNow.AddDays(7),
+            IsUsed = false,
+            IsRevoked = false
+        };
+
+        _context.RefreshTokens.Add(refreshToken);
+
+        await _context.SaveChangesAsync();
+
+        // Return tokens + user information
+        return Ok(new
+        {
+            userId = user.Id,
+            email = user.Email,
+            firstName = user.FirstName,
+            lastName = user.LastName,
+            accessToken,
+            refreshToken = refreshToken.Token
+        });
+    }
+
+    // ============================================================
+    // REFRESH TOKEN
+    // ============================================================
+
+    public record RefreshRequest(
+        string RefreshToken);
+
+    [HttpPost("refresh")]
+    public async Task<IActionResult> Refresh(
+        [FromBody] RefreshRequest request)
+    {
+        // Find refresh token in database
+        var storedToken =
+            await _context.RefreshTokens
+                .FirstOrDefaultAsync(
+                    rt => rt.Token == request.RefreshToken);
+
+        if (storedToken == null)
+        {
+            return Unauthorized(new
+            {
+                detail = "Invalid refresh token."
+            });
+        }
+
+        // ========================================================
+        // TOKEN THEFT DETECTION
+        // ========================================================
+
+        // If an already-used refresh token is submitted,
+        // revoke ALL refresh tokens belonging to that user.
+        if (storedToken.IsUsed)
+        {
+            var userTokens =
+                await _context.RefreshTokens
+                    .Where(rt =>
+                        rt.UserId == storedToken.UserId)
+                    .ToListAsync();
+
+            foreach (var token in userTokens)
+            {
+                token.IsRevoked = true;
+            }
+
+            await _context.SaveChangesAsync();
+
+            return Unauthorized(new
+            {
+                detail =
+                    "Token theft detected. All user sessions revoked."
+            });
+        }
+
+        // ========================================================
+        // CHECK EXPIRATION / REVOCATION
+        // ========================================================
+
+        if (storedToken.IsRevoked ||
+            storedToken.ExpiresAt < DateTime.UtcNow)
+        {
+            return Unauthorized(new
+            {
+                detail =
+                    "Refresh token expired or revoked."
+            });
+        }
+
+        // ========================================================
+        // MARK OLD TOKEN AS USED
+        // ========================================================
+
+        storedToken.IsUsed = true;
+
+        // ========================================================
+        // CREATE NEW REFRESH TOKEN
+        // ========================================================
+
+        var newRefreshToken = new RefreshToken
+        {
+            Token = Guid.NewGuid().ToString("N"),
+            UserId = storedToken.UserId,
+            ExpiresAt = DateTime.UtcNow.AddDays(7),
+            IsUsed = false,
+            IsRevoked = false
+        };
+
+        _context.RefreshTokens.Add(newRefreshToken);
+
+        // ========================================================
+        // GET USER
+        // ========================================================
+
+        var user =
+            await _userManager.FindByIdAsync(
+                storedToken.UserId);
+
+        if (user == null)
+        {
+            return Unauthorized(new
+            {
+                detail = "User not found."
+            });
+        }
+
+        // Get user's roles
+        var roles =
+            await _userManager.GetRolesAsync(user);
+
+        // Generate new access token
+        var newAccessToken =
+            _tokenService.GenerateJwt(user, roles);
+
+        // Save old token as used and new token
+        await _context.SaveChangesAsync();
+
+        // Return new token pair
+        return Ok(new
+        {
+            accessToken = newAccessToken,
+            refreshToken = newRefreshToken.Token
         });
     }
 }
+
+
+

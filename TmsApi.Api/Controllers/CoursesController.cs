@@ -1,10 +1,12 @@
+
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using TmsApi.Application.Dtos;
 using TmsApi.Application.Interfaces;
 
 namespace TmsApi.Api.Controllers;
 
-
+[Authorize(Roles = "Instructor,Admin")]
 [ApiController]
 [Route("api/courses")]
 [Tags("Courses")]
@@ -16,9 +18,8 @@ public class CoursesController(
     ICourseService courseService,
     LinkGenerator linkGenerator) : ControllerBase
 {
-
-
     [HttpGet]
+    [AllowAnonymous]
     [ProducesResponseType(
         typeof(PagedResponse<CourseResponseDto>),
         StatusCodes.Status200OK)]
@@ -37,9 +38,8 @@ public class CoursesController(
         return Ok(result);
     }
 
-
-
     [HttpGet("{id}", Name = nameof(GetCourseById))]
+    [AllowAnonymous]
     [ProducesResponseType(
         typeof(CourseDetailDto),
         StatusCodes.Status200OK)]
@@ -58,18 +58,14 @@ public class CoursesController(
                 id,
                 ct);
 
-
         if (course is null)
             return NotFound();
-
 
         var selfLink =
             linkGenerator.GetPathByName(
                 HttpContext,
                 nameof(GetCourseById),
                 new { id });
-
-
 
         course.Links.Add(new LinkDto
         {
@@ -78,11 +74,8 @@ public class CoursesController(
             Href = selfLink!
         });
 
-
         return Ok(course);
     }
-
-
 
     [HttpPost]
     [ProducesResponseType(
@@ -101,13 +94,10 @@ public class CoursesController(
         CreateCourseRequest request,
         CancellationToken ct)
     {
-
         var course =
             await courseService.CreateAsync(
                 request,
                 ct);
-
-
 
         return CreatedAtAction(
             nameof(GetCourseById),
@@ -118,3 +108,4 @@ public class CoursesController(
             course);
     }
 }
+

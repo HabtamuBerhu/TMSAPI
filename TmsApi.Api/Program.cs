@@ -2,9 +2,15 @@ using Asp.Versioning;
 using FluentValidation;
 using MediatR;
 using Microsoft.AspNetCore.Antiforgery;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.IdentityModel.Tokens;
+using Microsoft.AspNetCore.RateLimiting;
 using Scalar.AspNetCore;
+using System.Text;
 using System.Threading.Channels;
+using System.Threading.RateLimiting;
 
 using TmsApi.Api.ExceptionHandlers;
 using TmsApi.Application.Behaviors;
@@ -15,6 +21,7 @@ using TmsApi.Application.Notifications;
 using TmsApi.Application.Services;
 using TmsApi.Application.Transcripts;
 using TmsApi.Domain.Entities;
+using TmsApi.Infrastructure.Identity;
 using TmsApi.Infrastructure.Persistence;
 using TmsApi.Infrastructure.Services;
 using TmsApi.Infrastructure.Transcripts;
@@ -22,6 +29,74 @@ using TmsApi.Infrastructure.Workers;
 using TmsApi.Middleware;
 
 var builder = WebApplication.CreateBuilder(args);
+
+
+// ============================================================
+// TOKEN SERVICE
+// ============================================================
+
+builder.Services.AddScoped<TokenService>();
+
+
+// ============================================================
+// JWT AUTHENTICATION
+// ============================================================
+
+builder.Services
+    .AddAuthentication(options =>
+    {
+        options.DefaultAuthenticateScheme =
+            JwtBearerDefaults.AuthenticationScheme;
+
+        options.DefaultChallengeScheme =
+            JwtBearerDefaults.AuthenticationScheme;
+    })
+    .AddJwtBearer(options =>
+    {
+        options.TokenValidationParameters =
+            new TokenValidationParameters
+            {
+                ValidateIssuer = true,
+                ValidateAudience = true,
+                ValidateLifetime = true,
+                ValidateIssuerSigningKey = true,
+
+                ValidIssuer =
+                    builder.Configuration["Jwt:Issuer"],
+
+                ValidAudience =
+                    builder.Configuration["Jwt:Audience"],
+
+                IssuerSigningKey =
+                    new SymmetricSecurityKey(
+                        Encoding.UTF8.GetBytes(
+                            builder.Configuration["Jwt:Key"]!
+                        )
+                    )
+            };
+    });
+
+
+// ============================================================
+// AUTHORIZATION
+// ============================================================
+
+builder.Services.AddAuthorization();
+
+
+// ============================================================
+// RATE LIMITING
+// ============================================================
+
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddFixedWindowLimiter("AuthLimiter", opt =>
+    {
+        opt.PermitLimit = 5;
+        opt.Window = TimeSpan.FromMinutes(1);
+        opt.QueueLimit = 0;
+    });
+});
 
 
 // ============================================================
@@ -44,6 +119,34 @@ builder.Services.AddSignalR();
 builder.Services.AddAntiforgery(options =>
 {
     options.HeaderName = "X-XSRF-TOKEN";
+});
+
+
+// ============================================================
+// CORS
+// ============================================================
+
+var allowedOrigins =
+    builder.Configuration
+        .GetSection("AllowedOrigins")
+        .Get<string[]>()
+        ??
+        [
+            "http://localhost:4200"
+        ];
+
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("TmsClient", policy =>
+    {
+        policy
+            .WithOrigins(allowedOrigins)
+            .AllowAnyHeader()
+            .AllowAnyMethod()
+            .AllowCredentials()
+            .SetPreflightMaxAge(
+                TimeSpan.FromMinutes(10));
+    });
 });
 
 
@@ -81,9 +184,6 @@ builder.Services.AddValidatorsFromAssembly(
 // MEDIATR PIPELINE BEHAVIORS
 // ============================================================
 
-// LoggingBehavior FIRST.
-// It wraps ValidationBehavior.
-
 builder.Services.AddTransient(
     typeof(IPipelineBehavior<,>),
     typeof(LoggingBehavior<,>));
@@ -107,7 +207,8 @@ builder.Services.AddExceptionHandler<GlobalExceptionHandler>();
 builder.Services.AddDbContext<TmsDbContext>(options =>
 {
     options.UseNpgsql(
-        builder.Configuration.GetConnectionString("TmsDatabase"));
+        builder.Configuration.GetConnectionString(
+            "TmsDatabase"));
 
     options.LogTo(
         Console.WriteLine,
@@ -115,6 +216,35 @@ builder.Services.AddDbContext<TmsDbContext>(options =>
 
     options.EnableSensitiveDataLogging();
 });
+
+
+// ============================================================
+// ASP.NET CORE IDENTITY
+// ============================================================
+
+builder.Services
+    .AddIdentity<TmsUser, IdentityRole>(options =>
+    {
+        // Password settings
+        options.Password.RequireDigit = true;
+        options.Password.RequireLowercase = true;
+        options.Password.RequireUppercase = true;
+        options.Password.RequireNonAlphanumeric = false;
+        options.Password.RequiredLength = 6;
+
+        // User settings
+        options.User.RequireUniqueEmail = true;
+
+        // Lockout settings
+        options.Lockout.MaxFailedAccessAttempts = 5;
+
+        options.Lockout.DefaultLockoutTimeSpan =
+            TimeSpan.FromMinutes(15);
+
+        options.Lockout.AllowedForNewUsers = true;
+    })
+    .AddEntityFrameworkStores<TmsDbContext>()
+    .AddDefaultTokenProviders();
 
 
 // ============================================================
@@ -193,38 +323,38 @@ builder.Services.AddOpenApi(
 
 
 // ============================================================
-// CORS
-// ============================================================
-
-var allowedOrigins =
-    builder.Configuration
-        .GetSection("AllowedOrigins")
-        .Get<string[]>()
-        ??
-        [
-            "http://localhost:4200"
-        ];
-
-builder.Services.AddCors(options =>
-{
-    options.AddPolicy("TmsClient", policy =>
-    {
-        policy
-            .WithOrigins(allowedOrigins)
-            .AllowAnyHeader()
-            .AllowAnyMethod()
-            .AllowCredentials()
-            .SetPreflightMaxAge(
-                TimeSpan.FromMinutes(10));
-    });
-});
-
-
-// ============================================================
-// BUILD
+// BUILD APPLICATION
 // ============================================================
 
 var app = builder.Build();
+
+
+// ============================================================
+// SECURITY HEADERS
+// ============================================================
+
+app.Use(async (context, next) =>
+{
+    context.Response.Headers.Append(
+        "X-Content-Type-Options",
+        "nosniff");
+
+    context.Response.Headers.Append(
+        "X-Frame-Options",
+        "DENY");
+
+    context.Response.Headers.Append(
+        "Referrer-Policy",
+        "strict-origin-when-cross-origin");
+
+    context.Response.Headers.Append(
+        "Content-Security-Policy",
+        "default-src 'self'; " +
+        "script-src 'self'; " +
+        "style-src 'self' 'unsafe-inline';");
+
+    await next();
+});
 
 
 // ============================================================
@@ -245,20 +375,12 @@ app.UseStatusCodePages();
 // CORS
 // ============================================================
 
-// IMPORTANT:
-// This must be before MapControllers/MapHub.
-
 app.UseCors("TmsClient");
 
 
 // ============================================================
 // XSRF / ANTIFORGERY COOKIE
 // ============================================================
-//
-// Angular needs to read XSRF-TOKEN.
-// Therefore HttpOnly MUST be false for this cookie.
-//
-// The authentication cookie remains HttpOnly.
 
 app.Use(async (context, next) =>
 {
@@ -296,12 +418,34 @@ app.Use(async (context, next) =>
 
 
 // ============================================================
+// AUTHENTICATION
+// ============================================================
+
+app.UseAuthentication();
+
+
+// ============================================================
+// AUTHORIZATION
+// ============================================================
+
+app.UseAuthorization();
+
+
+// ============================================================
+// RATE LIMITING
+// ============================================================
+
+app.UseRateLimiter();
+
+
+// ============================================================
 // SIGNALR
 // ============================================================
 
-app.MapHub<TmsHub>("/hubs/tms");
+app.MapHub<TmsHub>("/hubs/tms")
+    .RequireCors("TmsClient");
 
-app.MapHub<TmsHub>("/hubs/tms").RequireCors("TmsClient");
+
 // ============================================================
 // DEVELOPMENT / OPENAPI
 // ============================================================
